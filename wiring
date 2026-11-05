@@ -1,0 +1,170 @@
+# wiring guide, solar tracker (team 20)
+
+follow top to bottom. each part ends with a quick check so you know it works before moving on.
+every pin below matches `include/config.h` as it is now. if you use a different pin, write it in the
+"your pin" column and change that line in config.h.
+
+## 0. rules (read once)
+
+1. all grounds are tied together: battery -, buck -, motor driver gnd, esp32 gnd, every sensor gnd.
+2. esp32 pins are 3.3 v. nothing over 3.3 v ever goes into an esp32 pin.
+3. 12 v only goes to: fuse, ina260 vin+ / vin-, motor driver P+, buck input. never near the esp32 header.
+4. set the buck to 5.0 v on its display BEFORE connecting it to anything.
+5. wire with the battery disconnected. connect the battery last.
+6. while the esp32 is plugged into the laptop by usb, do NOT also connect the buck's 5 v to it. usb or buck, never both.
+
+## 1. pin map at a glance
+
+| esp32 pin | goes to | config.h name | your pin |
+| --- | --- | --- | --- |
+| 3V3 | logic power for encoders, ina260, motor driver VCC, light circuit, anemometer pull-up | - | 3V3 |
+| 5V | gps vcc (and buck 5 v out when not on usb) | - | 5V |
+| GND | common ground | - | GND |
+| IO21 | tilt as5600 SDA + ina260 SDA | PIN_I2C_TILT_SDA | ____ |
+| IO22 | tilt as5600 SCL + ina260 SCL | PIN_I2C_TILT_SCL | ____ |
+| IO18 | azimuth as5600 SDA | PIN_I2C_AZ_SDA | ____ |
+| IO19 | azimuth as5600 SCL | PIN_I2C_AZ_SCL | ____ |
+| IO4 | gps TX | PIN_GPS_RX | ____ |
+| IO23 | gps RX | PIN_GPS_TX | ____ |
+| IO26 | motor driver INA1 (tilt) | PIN_TILT_MOTOR_A | ____ |
+| IO33 | motor driver INB1 (tilt) | PIN_TILT_MOTOR_B | ____ |
+| IO25 | motor driver PWM1 (tilt) | PIN_TILT_MOTOR_C | ____ |
+| IO13 | motor driver INA2 (azimuth) | PIN_AZ_MOTOR_A | ____ |
+| IO14 | motor driver INB2 (azimuth) | PIN_AZ_MOTOR_B | ____ |
+| IO27 | motor driver PWM2 (azimuth) | PIN_AZ_MOTOR_C | ____ |
+| IO34 | light circuit output | PIN_PHOTODIODE_ADC | ____ |
+| IO32 | tps22917 ON (light circuit power switch) | PIN_SENSOR_LOAD_SW | ____ |
+| IO35 | anemometer signal | PIN_ANEMOMETER | ____ |
+
+if you move a pin: never use 6-11 (flash). avoid 0, 2, 5, 12, 15 for outputs. 34-39 are input only
+(fine for light and anemometer, not for motors). the light circuit must stay on 32-39.
+
+## 2. power (12 v side)
+
+```
+battery +  -> inline fuse -> splits into two:
+                 a) ina260 Vin+  -> ina260 Vin-  -> motor driver P+
+                 b) buck input +
+battery -  -> motor driver P-, buck input -, buck output -, esp32 GND (all one ground)
+buck output + (set to 5.0 v) -> esp32 5V   (only when the esp32 is NOT on usb)
+```
+
+- fuse: start with 10 a. after `stroke` prints the peak current, pick about 1.5x that.
+- motor driver (dfr0601) power input is 6.5-37 v on P+ / P-. the battery is 12 v, fine.
+- buck (dfr0379): input 4-40 v, output adjustable. touch button on it switches the display between in and out voltage. set out to 5.0 v first.
+
+check: battery connected, buck display reads 5.0 v out, motor driver STATE led on and steady (fast blink = over-voltage, slow blink = under-voltage).
+
+## 3. motor driver (dfr0601) + actuators
+
+logic side:
+- VCC -> esp32 3V3
+- GND -> esp32 GND
+- INA1 -> IO26, INB1 -> IO33, PWM1 -> IO25 (tilt)
+- INA2 -> IO13, INB2 -> IO14, PWM2 -> IO27 (azimuth)
+- 10k resistor from IO25 to GND, and 10k from IO27 to GND (keeps motors off while the esp32 boots)
+
+motor side:
+- tilt actuator (lower one, base on the mast): its two wires -> M1_A and M1_B
+- azimuth actuator (upper one, base on the hanging strut): its two wires -> M2_A and M2_B
+- wire order does not matter yet. if "extend" retracts, swap the two wires or set `TILT_MOTOR_INVERT` / `AZ_MOTOR_INVERT = true`.
+
+check (after section 9 upload): `jog t ext 500` moves the tilt actuator a little, `jog a ext 500` moves azimuth.
+
+## 4. ina260 (current sensor, tilt i2c bus)
+
+- VCC -> 3V3, GND -> GND
+- SDA -> IO21, SCL -> IO22 (shared with the tilt encoder, that is fine, different address)
+- Vin+ / Vin- are in the 12 v line to the motor driver (section 2). Vin+ toward the battery, Vin- toward the driver.
+- leave A0 / A1 pads alone (address 0x40)
+
+check: `i2cscan` shows 0x40 on Wire (tilt).
+
+## 5. tilt encoder (as5600, tilt i2c bus)
+
+- VIN -> 3V3, GND -> GND, SDA -> IO21, SCL -> IO22 (stemma qt cable or jumpers)
+- leave DIR as it ships (tied to gnd), direction is set in software
+- mount: magnet on the end of the tilt shoulder bolt (turns with the crossbar), chip on the mast plate facing it, 0.5-3 mm gap, centered
+
+check: `i2cscan` shows 0x36 on Wire. `raw` says "magnet detected", no TOO WEAK / TOO STRONG, raw changes when the crossbar is tilted by hand.
+
+## 6. azimuth encoder (as5600, its own i2c bus)
+
+- VIN -> 3V3, GND -> GND, SDA -> IO18, SCL -> IO19
+- it needs its own bus because every as5600 has the same address (0x36)
+- mount: magnet on the azimuth shaft end, chip on the pillow block / crossbar side. NOT on anything fixed to the ground, or every tilt move looks like an azimuth move.
+- route both encoder cables away from the actuator power wires, keep them as short as you can
+
+check: `i2cscan` shows 0x36 on Wire1 (azimuth). `raw` shows the azimuth raw changing when the panel is rolled by hand.
+
+## 7. gps (neo-6m)
+
+- VCC -> 5V (worked in test 2.3), GND -> GND
+- gps TX -> IO4, gps RX -> IO23   (this replaces the IO26 / IO27 wiring from test 2.3, IO26 is now a motor pin)
+- antenna needs open sky, not inside a metal box
+
+check: `status` shows gps chars climbing right away, and "synced" plus satellites once it is outside. `sun` then prints the sun position.
+
+## 8. light circuit and anemometer
+
+light circuit (eyuel's photodiode + amp):
+- tps22917 ON -> IO32, tps22917 VIN -> 3V3, tps22917 VOUT -> powers the amp
+- amp output -> IO34. must never go above 3.3 v, check with a meter in full sun before connecting.
+- ground shared
+
+anemometer:
+- if it is a 2-wire switch type: one wire -> IO35, other wire -> GND, plus a 10k resistor from IO35 to 3V3 (IO35 has no internal pull-up)
+- if it has 3 wires or puts out a voltage: stop and check the datasheet first, IO35 cannot take over 3.3 v
+
+check: `light` prints millivolts that go up with a flashlight and down when covered.
+
+## 9. first upload and checks, in this order
+
+1. esp32 on usb only (buck 5 v disconnected from it), battery connected for the motors.
+2. upload, open serial monitor at 115200.
+3. boot shows `sun table: 2026 ... crc ok, in use` and a list of missing config values. that list is expected.
+4. `i2cscan` -> 0x36 + 0x40 on Wire, 0x36 on Wire1
+5. `raw` -> both magnets detected
+6. `jog t ext 500`, `jog a ext 500` -> each actuator moves a little
+7. `light` -> millivolts react to light
+8. `status` -> gps chars climbing
+
+## 10. values to fill in (config.h), after wiring works
+
+| value | how to get it | write it here |
+| --- | --- | --- |
+| TILT_ACT_RETRACTED_IN | tape measure, pin center to pin center, fully retracted | ____ |
+| TILT_ACT_EXTENDED_IN | same, fully extended (should be retracted + about 12.81) | ____ |
+| AZ_ACT_RETRACTED_IN | same for the azimuth actuator | ____ |
+| AZ_ACT_EXTENDED_IN | same | ____ |
+| TILT_ACT_SPEED_IN_S | `stroke t ext` prints it | ____ |
+| AZ_ACT_SPEED_IN_S | `stroke a ext` prints it | ____ |
+| MOVE_POWER_W | `stroke` prints it | ____ |
+| OVERCURRENT_A | `stroke` prints it | ____ |
+| TILT_EXTEND_SIGN | `jog t ext 500`: panel tipped south = +1, north = -1 | ____ |
+| AZ_EXTEND_SIGN | `jog a ext 500`: panel tipped east = +1, west = -1 | ____ |
+| TILT_ENC_DIR | `jog t ext 500`: raw went up while panel moved south = +1, else -1 | ____ |
+| AZ_ENC_DIR | `jog a ext 500`: raw went up while panel moved east = +1, else -1 | ____ |
+| TILT_ENC_STOW_RAW | `calibrate` prints it (do this after everything above, then upload again) | ____ |
+| AZ_ENC_STOW_RAW | `calibrate` prints it | ____ |
+| LIGHT_LUX_PER_MV | phone lux meter app next to the sensor: lux / the mV from `light` | ____ |
+| LIGHT_MIN_LUX | team pick, ~20000 to start (full sun ~100000, overcast ~1000-10000) | ____ |
+
+after these are in and uploaded, the boot list should show no `[blocks motion]` lines. then:
+`sun` (no motion) -> `goto t 10` -> `goto a 5` -> `stow` -> `cycle` -> `resume`.
+
+## 11. if something is off
+
+| symptom | likely cause |
+| --- | --- |
+| `i2cscan` finds nothing | sda / scl swapped, no 3V3 or gnd to the board, wrong pins in config.h |
+| `raw` says magnet MISSING or TOO WEAK | magnet too far (keep 0.5-3 mm) or off center |
+| `raw` says TOO STRONG | magnet too close |
+| raw jumps around while a motor runs | encoder cable next to actuator wires, reroute, keep it short |
+| actuator does not move on `jog` | motor driver VCC / gnd missing, battery not connected, STATE led blinking (check voltage) |
+| jog extend actually retracts | swap the two actuator wires, or set *_MOTOR_INVERT = true |
+| motor twitches at power-up | 10k pull-downs on IO25 / IO27 missing |
+| gps chars stay at 0 | gps tx / rx swapped (gps TX must go to IO4) |
+| gps chars climb but no sync | indoors, take it outside |
+| `light` reads 0 or 3300 mV constantly | tps22917 ON not wired to IO32, or amp output stuck / over range |
+| esp32 resets when a motor starts | weak 5 v or missing common ground, check the buck and grounds |
